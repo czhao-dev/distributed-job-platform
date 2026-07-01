@@ -1,8 +1,8 @@
-// Package worker implements the worker AGENT's client-side logic: register
-// with the control plane, heartbeat, poll for assigned jobs, execute them as
-// subprocesses, and report status back. This is distinct from
-// internal/model.Worker, which is the control plane's server-side record of
-// a registered worker.
+// Package worker implements the node AGENT's client-side logic: register
+// with the control plane as a Node, heartbeat, poll for assigned Pods,
+// execute them as subprocesses, and report status back. This is distinct from
+// internal/model.Node, which is the control plane's server-side record of a
+// registered node.
 package worker
 
 import (
@@ -20,7 +20,7 @@ import (
 	"github.com/czhao-dev/control-plane/internal/model"
 )
 
-// Config holds the worker agent's runtime configuration.
+// Config holds the node agent's runtime configuration.
 type Config struct {
 	ControlPlaneURL   string
 	Hostname          string
@@ -33,8 +33,8 @@ type Config struct {
 	ShutdownTimeout   time.Duration
 }
 
-// Agent is a worker agent process: it registers with the control plane,
-// heartbeats, polls for assigned jobs, and executes them as subprocesses.
+// Agent is a node agent process: it registers with the control plane,
+// heartbeats, polls for assigned pods, and executes them as subprocesses.
 type Agent struct {
 	cfg    Config
 	client *http.Client
@@ -56,17 +56,16 @@ func New(cfg Config, logger *slog.Logger) *Agent {
 
 // Run registers with the control plane, then blocks running the heartbeat
 // and poll loops until ctx is cancelled, at which point it stops polling
-// immediately and waits (up to ShutdownTimeout) for in-flight jobs to finish.
+// immediately and waits (up to ShutdownTimeout) for in-flight pods to finish.
 func (a *Agent) Run(ctx context.Context) error {
 	if err := a.register(ctx); err != nil {
 		return fmt.Errorf("register: %w", err)
 	}
-	a.logger.Info("worker registered", "worker_id", a.id, "control_plane", a.cfg.ControlPlaneURL)
+	a.logger.Info("node agent registered", "node_id", a.id, "control_plane", a.cfg.ControlPlaneURL)
 
 	// runCtx is deliberately NOT derived from ctx: it must stay alive after
-	// ctx is cancelled so in-flight jobs can run to completion during the
-	// graceful-shutdown drain below. Only the shutdown-timeout escape hatch
-	// (or this function returning) cancels it.
+	// ctx is cancelled so in-flight pods can run to completion during the
+	// graceful-shutdown drain below.
 	runCtx, runCancel := context.WithCancel(context.Background())
 	defer runCancel()
 
@@ -76,7 +75,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	go func() { defer loopWG.Done(); a.pollLoop(ctx, runCtx) }()
 
 	<-ctx.Done()
-	a.logger.Info("shutdown signal received, draining in-flight jobs", "timeout", a.cfg.ShutdownTimeout)
+	a.logger.Info("shutdown signal received, draining in-flight pods", "timeout", a.cfg.ShutdownTimeout)
 
 	drained := make(chan struct{})
 	go func() { a.wg.Wait(); close(drained) }()
@@ -84,13 +83,13 @@ func (a *Agent) Run(ctx context.Context) error {
 	select {
 	case <-drained:
 	case <-time.After(a.cfg.ShutdownTimeout):
-		a.logger.Warn("shutdown timeout exceeded, cancelling in-flight jobs")
+		a.logger.Warn("shutdown timeout exceeded, cancelling in-flight pods")
 		runCancel()
 		<-drained
 	}
 
 	loopWG.Wait()
-	a.logger.Info("worker stopped", "worker_id", a.id)
+	a.logger.Info("node agent stopped", "node_id", a.id)
 	return nil
 }
 
@@ -109,11 +108,11 @@ func (a *Agent) register(ctx context.Context) error {
 		MaxConcurrent: a.cfg.MaxConcurrentJobs,
 	})
 
-	var worker model.Worker
-	if err := a.post(ctx, "/api/v1/workers/register", body, http.StatusCreated, &worker); err != nil {
+	var node model.Node
+	if err := a.post(ctx, "/api/v1/nodes/register", body, http.StatusCreated, &node); err != nil {
 		return err
 	}
-	a.id = worker.ID
+	a.id = node.ID
 	return nil
 }
 
@@ -140,7 +139,7 @@ func (a *Agent) sendHeartbeat(ctx context.Context) {
 	body, _ := json.Marshal(heartbeatRequest{RunningJobs: running})
 
 	start := time.Now()
-	err := a.post(ctx, "/api/v1/workers/"+a.id+"/heartbeat", body, http.StatusOK, nil)
+	err := a.post(ctx, "/api/v1/nodes/"+a.id+"/heartbeat", body, http.StatusOK, nil)
 	agentmetrics.WorkerHeartbeatLatencySeconds.Observe(time.Since(start).Seconds())
 	if err != nil {
 		a.logger.Warn("heartbeat failed", "error", err)
@@ -161,7 +160,7 @@ func (a *Agent) pollLoop(ctx, runCtx context.Context) {
 }
 
 type pollResponse struct {
-	Job *model.Job `json:"job"`
+	Pod *model.Pod `json:"pod"`
 }
 
 func (a *Agent) pollOnce(ctx, runCtx context.Context) {
@@ -172,23 +171,23 @@ func (a *Agent) pollOnce(ctx, runCtx context.Context) {
 	}
 
 	var resp pollResponse
-	if err := a.get(ctx, "/api/v1/workers/"+a.id+"/jobs/poll", &resp); err != nil {
+	if err := a.get(ctx, "/api/v1/nodes/"+a.id+"/pods/poll", &resp); err != nil {
 		<-a.sem
 		a.logger.Warn("poll failed", "error", err)
 		return
 	}
-	if resp.Job == nil {
+	if resp.Pod == nil {
 		<-a.sem
 		return
 	}
 
-	job := *resp.Job
+	pod := *resp.Pod
 	a.wg.Add(1)
 	agentmetrics.WorkerRunningJobs.Set(float64(len(a.sem)))
 	go func() {
 		defer a.wg.Done()
 		defer func() { <-a.sem; agentmetrics.WorkerRunningJobs.Set(float64(len(a.sem))) }()
-		a.runJob(runCtx, job)
+		a.runPod(runCtx, pod)
 	}()
 }
 

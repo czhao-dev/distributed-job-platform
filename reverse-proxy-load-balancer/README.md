@@ -210,7 +210,7 @@ This project focuses on proxy and load-balancing mechanics, not production harde
 
 ## Non-Goals
 
-This is not a replacement for NGINX, HAProxy, Envoy, or Traefik. It does not implement HTTP/2 or HTTP/3 proxying, service-mesh features, dynamic service discovery, or Kubernetes ingress integration — the goal is to make the core mechanics of a load balancer legible in a small Go codebase, not to compete with mature production systems.
+This is not a replacement for NGINX, HAProxy, Envoy, or Traefik. It does not implement HTTP/2 or HTTP/3 proxying, service-mesh features, dynamic service discovery, or ingress controller integration — the goal is to make the core mechanics of a load balancer legible in a small Go codebase, not to compete with mature production systems.
 
 ## License
 

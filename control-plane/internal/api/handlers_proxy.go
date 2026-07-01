@@ -8,85 +8,99 @@ import (
 	"github.com/czhao-dev/control-plane/internal/state"
 )
 
-// ListRoutes handles GET /api/v1/routes.
-func (h *Handlers) ListRoutes(w http.ResponseWriter, r *http.Request) {
-	routes, err := h.store.ListRoutes(r.Context())
+// ListServices handles GET /api/v1/services.
+// Supports optional ?namespace=<ns> query param.
+func (h *Handlers) ListServices(w http.ResponseWriter, r *http.Request) {
+	ns := r.URL.Query().Get("namespace")
+	services, err := h.store.ListServices(r.Context())
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"routes": routes, "total": len(routes)})
+	if ns != "" {
+		filtered := services[:0]
+		for _, svc := range services {
+			if svc.Namespace == ns {
+				filtered = append(filtered, svc)
+			}
+		}
+		services = filtered
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"services": services, "total": len(services)})
 }
 
-// CreateRoute handles POST /api/v1/routes.
-func (h *Handlers) CreateRoute(w http.ResponseWriter, r *http.Request) {
-	var route model.Route
-	if err := json.NewDecoder(r.Body).Decode(&route); err != nil {
+// CreateService handles POST /api/v1/services.
+func (h *Handlers) CreateService(w http.ResponseWriter, r *http.Request) {
+	var svc model.Service
+	if err := json.NewDecoder(r.Body).Decode(&svc); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if route.PathPrefix == "" {
+	if svc.PathPrefix == "" {
 		writeJSONError(w, http.StatusBadRequest, "path_prefix is required")
 		return
 	}
-	if route.ID == "" {
-		genID, err := generateID("route")
+	if svc.ID == "" {
+		genID, err := generateID("svc")
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to generate route id")
+			writeJSONError(w, http.StatusInternalServerError, "failed to generate service id")
 			return
 		}
-		route.ID = genID
+		svc.ID = genID
 	}
-	if route.Strategy == "" {
-		route.Strategy = model.StrategyRoundRobin
+	if svc.Strategy == "" {
+		svc.Strategy = model.StrategyRoundRobin
 	}
-	if err := h.store.UpsertRoute(r.Context(), &route); err != nil {
+	if svc.Namespace == "" {
+		svc.Namespace = "default"
+	}
+	if err := h.store.UpsertService(r.Context(), &svc); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	created, _ := h.store.GetRoute(r.Context(), route.ID)
-	w.Header().Set("Location", "/api/v1/routes/"+route.ID)
+	created, _ := h.store.GetService(r.Context(), svc.ID)
+	w.Header().Set("Location", "/api/v1/services/"+svc.ID)
 	writeJSON(w, http.StatusCreated, created)
 }
 
-// GetRoute handles GET /api/v1/routes/{id}.
-func (h *Handlers) GetRoute(w http.ResponseWriter, r *http.Request) {
+// GetService handles GET /api/v1/services/{id}.
+func (h *Handlers) GetService(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	route, err := h.store.GetRoute(r.Context(), id)
+	svc, err := h.store.GetService(r.Context(), id)
 	if err != nil {
-		writeJSONError(w, http.StatusNotFound, "route not found")
+		writeJSONError(w, http.StatusNotFound, "service not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, route)
+	writeJSON(w, http.StatusOK, svc)
 }
 
-// UpdateRoute handles PUT /api/v1/routes/{id}.
-func (h *Handlers) UpdateRoute(w http.ResponseWriter, r *http.Request) {
+// UpdateService handles PUT /api/v1/services/{id}.
+func (h *Handlers) UpdateService(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, err := h.store.GetRoute(r.Context(), id); err != nil {
-		writeJSONError(w, http.StatusNotFound, "route not found")
+	if _, err := h.store.GetService(r.Context(), id); err != nil {
+		writeJSONError(w, http.StatusNotFound, "service not found")
 		return
 	}
-	var route model.Route
-	if err := json.NewDecoder(r.Body).Decode(&route); err != nil {
+	var svc model.Service
+	if err := json.NewDecoder(r.Body).Decode(&svc); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	route.ID = id
-	if err := h.store.UpsertRoute(r.Context(), &route); err != nil {
+	svc.ID = id
+	if err := h.store.UpsertService(r.Context(), &svc); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	updated, _ := h.store.GetRoute(r.Context(), id)
+	updated, _ := h.store.GetService(r.Context(), id)
 	writeJSON(w, http.StatusOK, updated)
 }
 
-// DeleteRoute handles DELETE /api/v1/routes/{id}.
-func (h *Handlers) DeleteRoute(w http.ResponseWriter, r *http.Request) {
+// DeleteService handles DELETE /api/v1/services/{id}.
+func (h *Handlers) DeleteService(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := h.store.DeleteRoute(r.Context(), id); err != nil {
+	if err := h.store.DeleteService(r.Context(), id); err != nil {
 		if err == state.ErrNotFound {
-			writeJSONError(w, http.StatusNotFound, "route not found")
+			writeJSONError(w, http.StatusNotFound, "service not found")
 			return
 		}
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
@@ -95,34 +109,65 @@ func (h *Handlers) DeleteRoute(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// ProxyConfig handles GET /api/v1/proxy/config -- the full set of routes the
-// reverse proxy should be aware of.
-func (h *Handlers) ProxyConfig(w http.ResponseWriter, r *http.Request) {
-	routes, err := h.store.ListRoutes(r.Context())
+// GetServiceBackends handles GET /api/v1/services/{id}/backends.
+// Returns the set of healthy nodes matched by the service's selector.
+func (h *Handlers) GetServiceBackends(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	svc, err := h.store.GetService(r.Context(), id)
+	if err != nil {
+		writeJSONError(w, http.StatusNotFound, "service not found")
+		return
+	}
+	backends, err := h.resolveServiceBackends(r.Context(), svc)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"routes": routes})
+	writeJSON(w, http.StatusOK, map[string]any{"backends": backends, "total": len(backends)})
 }
 
-// ProxyBackends handles GET /api/v1/proxy/backends. It synthesizes the
-// dynamic-discovery proxy's backend list live from currently HEALTHY
-// workers -- this is the literal "proxy routes to worker nodes" story: the
-// reverse proxy load-balances directly across the worker fleet the control
-// plane is managing, rather than a separately-configured static set.
-func (h *Handlers) ProxyBackends(w http.ResponseWriter, r *http.Request) {
-	workers, err := h.store.ListWorkers(r.Context())
+// ProxyConfig handles GET /api/v1/proxy/config -- the full set of services
+// the reverse proxy should be aware of.
+func (h *Handlers) ProxyConfig(w http.ResponseWriter, r *http.Request) {
+	services, err := h.store.ListServices(r.Context())
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	backends := make([]model.BackendSpec, 0, len(workers))
-	for _, wk := range workers {
-		if wk.Status != model.WorkerHealthy {
+	writeJSON(w, http.StatusOK, map[string]any{"services": services})
+}
+
+// ProxyBackends handles GET /api/v1/proxy/backends. Synthesizes the dynamic
+// proxy's backend list from currently HEALTHY nodes. Accepts an optional
+// ?service={id} param: if given, resolves backends via that service's
+// selector rather than returning all healthy nodes.
+func (h *Handlers) ProxyBackends(w http.ResponseWriter, r *http.Request) {
+	if svcID := r.URL.Query().Get("service"); svcID != "" {
+		svc, err := h.store.GetService(r.Context(), svcID)
+		if err != nil {
+			writeJSONError(w, http.StatusNotFound, "service not found")
+			return
+		}
+		backends, err := h.resolveServiceBackends(r.Context(), svc)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"backends": backends})
+		return
+	}
+
+	nodes, err := h.store.ListNodes(r.Context())
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	backends := make([]model.BackendSpec, 0, len(nodes))
+	for _, n := range nodes {
+		if n.Status != model.NodeHealthy {
 			continue
 		}
-		backends = append(backends, model.BackendSpec{Name: wk.ID, URL: wk.Address, Weight: 1})
+		backends = append(backends, model.BackendSpec{Name: n.ID, URL: n.Address, Weight: 1})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"backends": backends})
 }

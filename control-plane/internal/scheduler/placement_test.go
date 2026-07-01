@@ -9,64 +9,64 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestSelectWorker_NoCandidates(t *testing.T) {
-	_, err := SelectWorker(nil, model.ResourceRequest{})
+func TestSelectNode_NoCandidates(t *testing.T) {
+	_, err := SelectNode(nil, model.ResourceRequest{})
 	assert.ErrorIs(t, err, ErrNoCapacity)
 }
 
-func TestSelectWorker_AllUnhealthy(t *testing.T) {
-	candidates := []*model.Worker{
-		{ID: "w1", Status: model.WorkerUnhealthy, Available: model.ResourceCapacity{CPU: 10, MemoryMB: 10000}},
-		{ID: "w2", Status: model.WorkerDraining, Available: model.ResourceCapacity{CPU: 10, MemoryMB: 10000}},
+func TestSelectNode_AllUnhealthy(t *testing.T) {
+	candidates := []*model.Node{
+		{ID: "n1", Status: model.NodeUnhealthy, Available: model.ResourceCapacity{CPU: 10, MemoryMB: 10000}},
+		{ID: "n2", Status: model.NodeDraining, Available: model.ResourceCapacity{CPU: 10, MemoryMB: 10000}},
 	}
-	_, err := SelectWorker(candidates, model.ResourceRequest{CPU: 1, MemoryMB: 1})
+	_, err := SelectNode(candidates, model.ResourceRequest{CPU: 1, MemoryMB: 1})
 	assert.ErrorIs(t, err, ErrNoCapacity)
 }
 
-func TestSelectWorker_AllOverCapacity(t *testing.T) {
-	candidates := []*model.Worker{
-		{ID: "w1", Status: model.WorkerHealthy, Available: model.ResourceCapacity{CPU: 0.1, MemoryMB: 10}},
+func TestSelectNode_AllOverCapacity(t *testing.T) {
+	candidates := []*model.Node{
+		{ID: "n1", Status: model.NodeHealthy, Available: model.ResourceCapacity{CPU: 0.1, MemoryMB: 10}},
 	}
-	_, err := SelectWorker(candidates, model.ResourceRequest{CPU: 1, MemoryMB: 100})
+	_, err := SelectNode(candidates, model.ResourceRequest{CPU: 1, MemoryMB: 100})
 	assert.ErrorIs(t, err, ErrNoCapacity)
 }
 
-func TestSelectWorker_ExactFit(t *testing.T) {
-	candidates := []*model.Worker{
-		{ID: "w1", Status: model.WorkerHealthy, Available: model.ResourceCapacity{CPU: 1, MemoryMB: 512}},
+func TestSelectNode_ExactFit(t *testing.T) {
+	candidates := []*model.Node{
+		{ID: "n1", Status: model.NodeHealthy, Available: model.ResourceCapacity{CPU: 1, MemoryMB: 512}},
 	}
-	w, err := SelectWorker(candidates, model.ResourceRequest{CPU: 1, MemoryMB: 512})
+	n, err := SelectNode(candidates, model.ResourceRequest{CPU: 1, MemoryMB: 512})
 	require.NoError(t, err)
-	assert.Equal(t, "w1", w.ID)
+	assert.Equal(t, "n1", n.ID)
 }
 
-func TestSelectWorker_PicksLeastLoaded(t *testing.T) {
-	candidates := []*model.Worker{
-		{ID: "busy", Status: model.WorkerHealthy, RunningJobs: 5, Available: model.ResourceCapacity{CPU: 10, MemoryMB: 10000}},
-		{ID: "idle", Status: model.WorkerHealthy, RunningJobs: 1, Available: model.ResourceCapacity{CPU: 10, MemoryMB: 10000}},
+func TestSelectNode_PicksLeastLoaded(t *testing.T) {
+	candidates := []*model.Node{
+		{ID: "busy", Status: model.NodeHealthy, RunningJobs: 5, Available: model.ResourceCapacity{CPU: 10, MemoryMB: 10000}},
+		{ID: "idle", Status: model.NodeHealthy, RunningJobs: 1, Available: model.ResourceCapacity{CPU: 10, MemoryMB: 10000}},
 	}
-	w, err := SelectWorker(candidates, model.ResourceRequest{})
+	n, err := SelectNode(candidates, model.ResourceRequest{})
 	require.NoError(t, err)
-	assert.Equal(t, "idle", w.ID)
+	assert.Equal(t, "idle", n.ID)
 }
 
-func TestSelectWorker_TieBreaksByRegisteredAt(t *testing.T) {
+func TestSelectNode_TieBreaksByRegisteredAt(t *testing.T) {
 	now := time.Now()
-	candidates := []*model.Worker{
-		{ID: "newer", Status: model.WorkerHealthy, RunningJobs: 1, RegisteredAt: now.Add(time.Minute), Available: model.ResourceCapacity{CPU: 10, MemoryMB: 10000}},
-		{ID: "older", Status: model.WorkerHealthy, RunningJobs: 1, RegisteredAt: now, Available: model.ResourceCapacity{CPU: 10, MemoryMB: 10000}},
+	candidates := []*model.Node{
+		{ID: "newer", Status: model.NodeHealthy, RunningJobs: 1, RegisteredAt: now.Add(time.Minute), Available: model.ResourceCapacity{CPU: 10, MemoryMB: 10000}},
+		{ID: "older", Status: model.NodeHealthy, RunningJobs: 1, RegisteredAt: now, Available: model.ResourceCapacity{CPU: 10, MemoryMB: 10000}},
 	}
-	w, err := SelectWorker(candidates, model.ResourceRequest{})
+	n, err := SelectNode(candidates, model.ResourceRequest{})
 	require.NoError(t, err)
-	assert.Equal(t, "older", w.ID)
+	assert.Equal(t, "older", n.ID)
 }
 
-func TestSelectWorker_SkipsMaxConcurrency(t *testing.T) {
-	candidates := []*model.Worker{
-		{ID: "full", Status: model.WorkerHealthy, RunningJobs: 2, MaxConcurrent: 2, Available: model.ResourceCapacity{CPU: 10, MemoryMB: 10000}},
-		{ID: "ok", Status: model.WorkerHealthy, RunningJobs: 1, MaxConcurrent: 2, Available: model.ResourceCapacity{CPU: 10, MemoryMB: 10000}},
+func TestSelectNode_SkipsMaxConcurrency(t *testing.T) {
+	candidates := []*model.Node{
+		{ID: "full", Status: model.NodeHealthy, RunningJobs: 2, MaxConcurrent: 2, Available: model.ResourceCapacity{CPU: 10, MemoryMB: 10000}},
+		{ID: "ok", Status: model.NodeHealthy, RunningJobs: 1, MaxConcurrent: 2, Available: model.ResourceCapacity{CPU: 10, MemoryMB: 10000}},
 	}
-	w, err := SelectWorker(candidates, model.ResourceRequest{})
+	n, err := SelectNode(candidates, model.ResourceRequest{})
 	require.NoError(t, err)
-	assert.Equal(t, "ok", w.ID)
+	assert.Equal(t, "ok", n.ID)
 }

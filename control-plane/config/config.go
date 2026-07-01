@@ -12,6 +12,7 @@ type Config struct {
 	Port              int
 	LogLevel          string
 	LogFormat         string
+	DBPath            string // CTRLPLANE_DB_PATH: path to BoltDB file; "" → in-memory only
 	SchedulerInterval time.Duration
 	ReconcileInterval time.Duration
 	HeartbeatTimeout  time.Duration
@@ -23,6 +24,7 @@ func Load() Config {
 		Port:              envInt("CTRLPLANE_PORT", 7070),
 		LogLevel:          envString("CTRLPLANE_LOG_LEVEL", "info"),
 		LogFormat:         envString("CTRLPLANE_LOG_FORMAT", "json"),
+		DBPath:            envString("CTRLPLANE_DB_PATH", ""),
 		SchedulerInterval: envDuration("CTRLPLANE_SCHEDULER_INTERVAL", 500*time.Millisecond),
 		ReconcileInterval: envDuration("CTRLPLANE_RECONCILE_INTERVAL", 2*time.Second),
 		HeartbeatTimeout:  envDuration("CTRLPLANE_HEARTBEAT_TIMEOUT", 15*time.Second),

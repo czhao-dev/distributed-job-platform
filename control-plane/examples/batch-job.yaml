@@ -1,4 +1,8 @@
 name: image-processing
+namespace: default
+labels:
+  app: image-processing
+  tier: batch
 type: batch
 command: "sleep"
 args: ["3"]

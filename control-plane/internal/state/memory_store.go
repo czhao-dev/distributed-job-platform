@@ -11,15 +11,13 @@ import (
 // MemoryStore is a concurrent, in-memory Store backed by sync.Map, one per
 // entity type. A single coarse mutex guards all write paths: this is a
 // low-throughput control plane (not a hot data path), and a shared mutex
-// keeps cross-entity invariants (e.g. the reconciler counting jobs per
-// workload) simple to reason about without per-map lock ordering. Reads are
-// lock-free.
+// keeps cross-entity invariants simple to reason about. Reads are lock-free.
 type MemoryStore struct {
-	mu        sync.Mutex
-	workloads sync.Map // id -> model.Workload
-	jobs      sync.Map // id -> model.Job
-	workers   sync.Map // id -> model.Worker
-	routes    sync.Map // id -> model.Route
+	mu          sync.Mutex
+	deployments sync.Map // id -> model.Deployment
+	pods        sync.Map // id -> model.Pod
+	nodes       sync.Map // id -> model.Node
+	services    sync.Map // id -> model.Service
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -28,102 +26,115 @@ func NewMemoryStore() *MemoryStore {
 
 var _ Store = (*MemoryStore)(nil)
 
-// --- Workloads ---
+// --- Deployments ---
 
-func (s *MemoryStore) CreateWorkload(_ context.Context, w *model.Workload) error {
+func (s *MemoryStore) CreateDeployment(_ context.Context, d *model.Deployment) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, exists := s.workloads.Load(w.ID); exists {
+	if _, exists := s.deployments.Load(d.ID); exists {
 		return ErrAlreadyExists
 	}
-	s.workloads.Store(w.ID, w.Clone())
+	s.deployments.Store(d.ID, d.Clone())
 	return nil
 }
 
-func (s *MemoryStore) GetWorkload(_ context.Context, id string) (*model.Workload, error) {
-	v, ok := s.workloads.Load(id)
+func (s *MemoryStore) GetDeployment(_ context.Context, id string) (*model.Deployment, error) {
+	v, ok := s.deployments.Load(id)
 	if !ok {
 		return nil, ErrNotFound
 	}
-	w := v.(model.Workload).Clone()
-	return &w, nil
+	d := v.(model.Deployment).Clone()
+	return &d, nil
 }
 
-func (s *MemoryStore) ListWorkloads(_ context.Context) ([]*model.Workload, error) {
-	var out []*model.Workload
-	s.workloads.Range(func(_, v any) bool {
-		w := v.(model.Workload).Clone()
-		out = append(out, &w)
+func (s *MemoryStore) ListDeployments(_ context.Context) ([]*model.Deployment, error) {
+	var out []*model.Deployment
+	s.deployments.Range(func(_, v any) bool {
+		d := v.(model.Deployment).Clone()
+		out = append(out, &d)
 		return true
 	})
 	return out, nil
 }
 
-func (s *MemoryStore) UpdateWorkload(_ context.Context, w *model.Workload) error {
+func (s *MemoryStore) ListDeploymentsByNamespace(_ context.Context, namespace string) ([]*model.Deployment, error) {
+	var out []*model.Deployment
+	s.deployments.Range(func(_, v any) bool {
+		d := v.(model.Deployment)
+		if d.Namespace == namespace {
+			c := d.Clone()
+			out = append(out, &c)
+		}
+		return true
+	})
+	return out, nil
+}
+
+func (s *MemoryStore) UpdateDeployment(_ context.Context, d *model.Deployment) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, exists := s.workloads.Load(w.ID); !exists {
+	if _, exists := s.deployments.Load(d.ID); !exists {
 		return ErrNotFound
 	}
-	w.UpdatedAt = time.Now()
-	s.workloads.Store(w.ID, w.Clone())
+	d.UpdatedAt = time.Now()
+	s.deployments.Store(d.ID, d.Clone())
 	return nil
 }
 
-func (s *MemoryStore) TransitionWorkload(_ context.Context, id string, to model.WorkloadStatus) error {
+func (s *MemoryStore) TransitionDeployment(_ context.Context, id string, to model.DeploymentStatus) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	v, ok := s.workloads.Load(id)
+	v, ok := s.deployments.Load(id)
 	if !ok {
 		return ErrNotFound
 	}
-	w := v.(model.Workload)
-	if !model.TransitionWorkload(w.Status, to) {
+	d := v.(model.Deployment)
+	if !model.TransitionDeployment(d.Status, to) {
 		return ErrInvalidTransition
 	}
-	w.Status = to
-	w.UpdatedAt = time.Now()
-	s.workloads.Store(id, w)
+	d.Status = to
+	d.UpdatedAt = time.Now()
+	s.deployments.Store(id, d)
 	return nil
 }
 
-func (s *MemoryStore) DeleteWorkload(_ context.Context, id string) error {
+func (s *MemoryStore) DeleteDeployment(_ context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, exists := s.workloads.Load(id); !exists {
+	if _, exists := s.deployments.Load(id); !exists {
 		return ErrNotFound
 	}
-	s.workloads.Delete(id)
+	s.deployments.Delete(id)
 	return nil
 }
 
-// --- Jobs ---
+// --- Pods ---
 
-func (s *MemoryStore) CreateJob(_ context.Context, j *model.Job) error {
+func (s *MemoryStore) CreatePod(_ context.Context, p *model.Pod) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, exists := s.jobs.Load(j.ID); exists {
+	if _, exists := s.pods.Load(p.ID); exists {
 		return ErrAlreadyExists
 	}
-	s.jobs.Store(j.ID, j.Clone())
+	s.pods.Store(p.ID, p.Clone())
 	return nil
 }
 
-func (s *MemoryStore) GetJob(_ context.Context, id string) (*model.Job, error) {
-	v, ok := s.jobs.Load(id)
+func (s *MemoryStore) GetPod(_ context.Context, id string) (*model.Pod, error) {
+	v, ok := s.pods.Load(id)
 	if !ok {
 		return nil, ErrNotFound
 	}
-	j := v.(model.Job).Clone()
-	return &j, nil
+	p := v.(model.Pod).Clone()
+	return &p, nil
 }
 
-func (s *MemoryStore) ListJobsByWorkload(_ context.Context, workloadID string) ([]*model.Job, error) {
-	var out []*model.Job
-	s.jobs.Range(func(_, v any) bool {
-		j := v.(model.Job)
-		if j.WorkloadID == workloadID {
-			c := j.Clone()
+func (s *MemoryStore) ListPodsByDeployment(_ context.Context, deploymentID string) ([]*model.Pod, error) {
+	var out []*model.Pod
+	s.pods.Range(func(_, v any) bool {
+		p := v.(model.Pod)
+		if p.DeploymentID == deploymentID {
+			c := p.Clone()
 			out = append(out, &c)
 		}
 		return true
@@ -131,12 +142,12 @@ func (s *MemoryStore) ListJobsByWorkload(_ context.Context, workloadID string) (
 	return out, nil
 }
 
-func (s *MemoryStore) ListJobsByStatus(_ context.Context, status model.JobStatus) ([]*model.Job, error) {
-	var out []*model.Job
-	s.jobs.Range(func(_, v any) bool {
-		j := v.(model.Job)
-		if j.Status == status {
-			c := j.Clone()
+func (s *MemoryStore) ListPodsByStatus(_ context.Context, status model.PodStatus) ([]*model.Pod, error) {
+	var out []*model.Pod
+	s.pods.Range(func(_, v any) bool {
+		p := v.(model.Pod)
+		if p.Status == status {
+			c := p.Clone()
 			out = append(out, &c)
 		}
 		return true
@@ -144,12 +155,12 @@ func (s *MemoryStore) ListJobsByStatus(_ context.Context, status model.JobStatus
 	return out, nil
 }
 
-func (s *MemoryStore) ListJobsByWorker(_ context.Context, workerID string) ([]*model.Job, error) {
-	var out []*model.Job
-	s.jobs.Range(func(_, v any) bool {
-		j := v.(model.Job)
-		if j.WorkerID == workerID {
-			c := j.Clone()
+func (s *MemoryStore) ListPodsByNode(_ context.Context, nodeID string) ([]*model.Pod, error) {
+	var out []*model.Pod
+	s.pods.Range(func(_, v any) bool {
+		p := v.(model.Pod)
+		if p.NodeID == nodeID {
+			c := p.Clone()
 			out = append(out, &c)
 		}
 		return true
@@ -157,161 +168,187 @@ func (s *MemoryStore) ListJobsByWorker(_ context.Context, workerID string) ([]*m
 	return out, nil
 }
 
-// UpdateJob overwrites the stored job wholesale. Callers own validating any
-// state-transition rules before calling Update (TransitionJob is the
+func (s *MemoryStore) ListPodsByLabels(_ context.Context, namespace string, selector map[string]string) ([]*model.Pod, error) {
+	var out []*model.Pod
+	s.pods.Range(func(_, v any) bool {
+		p := v.(model.Pod)
+		if (namespace == "" || p.Namespace == namespace) && matchesSelector(p.Labels, selector) {
+			c := p.Clone()
+			out = append(out, &c)
+		}
+		return true
+	})
+	return out, nil
+}
+
+// UpdatePod overwrites the stored pod wholesale. Callers own validating any
+// state-transition rules before calling Update (TransitionPod is the
 // validated alternative for state changes).
-func (s *MemoryStore) UpdateJob(_ context.Context, j *model.Job) error {
+func (s *MemoryStore) UpdatePod(_ context.Context, p *model.Pod) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, exists := s.jobs.Load(j.ID); !exists {
+	if _, exists := s.pods.Load(p.ID); !exists {
 		return ErrNotFound
 	}
-	s.jobs.Store(j.ID, j.Clone())
+	s.pods.Store(p.ID, p.Clone())
 	return nil
 }
 
-// TransitionJob validates and applies a status transition for job id,
+// TransitionPod validates and applies a status transition for pod id,
 // updating ScheduledAt/StartedAt/FinishedAt and Error as part of the same
 // atomic update.
-func (s *MemoryStore) TransitionJob(_ context.Context, id string, to model.JobStatus, errMsg string) error {
+func (s *MemoryStore) TransitionPod(_ context.Context, id string, to model.PodStatus, errMsg string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	v, ok := s.jobs.Load(id)
+	v, ok := s.pods.Load(id)
 	if !ok {
 		return ErrNotFound
 	}
-	j := v.(model.Job)
+	p := v.(model.Pod)
 
-	if !model.TransitionJob(j.Status, to) {
+	if !model.TransitionPod(p.Status, to) {
 		return ErrInvalidTransition
 	}
 
-	j.Status = to
+	p.Status = to
 	if errMsg != "" {
-		j.Error = errMsg
+		p.Error = errMsg
 	}
 
 	now := time.Now()
 	switch to {
-	case model.JobScheduled:
-		if j.ScheduledAt == nil {
-			j.ScheduledAt = &now
+	case model.PodScheduled:
+		if p.ScheduledAt == nil {
+			p.ScheduledAt = &now
 		}
-	case model.JobRunning:
-		if j.StartedAt == nil {
-			j.StartedAt = &now
+	case model.PodRunning:
+		if p.StartedAt == nil {
+			p.StartedAt = &now
 		}
 	}
-	if isTerminalJobStatus(to) && j.FinishedAt == nil {
-		j.FinishedAt = &now
+	if isTerminalPodStatus(to) && p.FinishedAt == nil {
+		p.FinishedAt = &now
 	}
 
-	s.jobs.Store(id, j)
+	s.pods.Store(id, p)
 	return nil
 }
 
-func isTerminalJobStatus(s model.JobStatus) bool {
+func isTerminalPodStatus(s model.PodStatus) bool {
 	switch s {
-	case model.JobSucceeded, model.JobDeadLetter, model.JobCancelled:
+	case model.PodSucceeded, model.PodDeadLetter, model.PodCancelled:
 		return true
 	default:
 		return false
 	}
 }
 
-// --- Workers ---
+// --- Nodes ---
 
-func (s *MemoryStore) RegisterWorker(_ context.Context, w *model.Worker) error {
+func (s *MemoryStore) RegisterNode(_ context.Context, n *model.Node) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, exists := s.workers.Load(w.ID); exists {
+	if _, exists := s.nodes.Load(n.ID); exists {
 		return ErrAlreadyExists
 	}
-	s.workers.Store(w.ID, w.Clone())
+	s.nodes.Store(n.ID, n.Clone())
 	return nil
 }
 
-func (s *MemoryStore) GetWorker(_ context.Context, id string) (*model.Worker, error) {
-	v, ok := s.workers.Load(id)
+func (s *MemoryStore) GetNode(_ context.Context, id string) (*model.Node, error) {
+	v, ok := s.nodes.Load(id)
 	if !ok {
 		return nil, ErrNotFound
 	}
-	w := v.(model.Worker).Clone()
-	return &w, nil
+	n := v.(model.Node).Clone()
+	return &n, nil
 }
 
-func (s *MemoryStore) ListWorkers(_ context.Context) ([]*model.Worker, error) {
-	var out []*model.Worker
-	s.workers.Range(func(_, v any) bool {
-		w := v.(model.Worker).Clone()
-		out = append(out, &w)
+func (s *MemoryStore) ListNodes(_ context.Context) ([]*model.Node, error) {
+	var out []*model.Node
+	s.nodes.Range(func(_, v any) bool {
+		n := v.(model.Node).Clone()
+		out = append(out, &n)
 		return true
 	})
 	return out, nil
 }
 
-func (s *MemoryStore) UpdateWorker(_ context.Context, w *model.Worker) error {
+func (s *MemoryStore) ListNodesByLabels(_ context.Context, selector map[string]string) ([]*model.Node, error) {
+	var out []*model.Node
+	s.nodes.Range(func(_, v any) bool {
+		n := v.(model.Node)
+		if matchesSelector(n.Labels, selector) {
+			c := n.Clone()
+			out = append(out, &c)
+		}
+		return true
+	})
+	return out, nil
+}
+
+func (s *MemoryStore) UpdateNode(_ context.Context, n *model.Node) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, exists := s.workers.Load(w.ID); !exists {
+	if _, exists := s.nodes.Load(n.ID); !exists {
 		return ErrNotFound
 	}
-	s.workers.Store(w.ID, w.Clone())
+	s.nodes.Store(n.ID, n.Clone())
 	return nil
 }
 
-func (s *MemoryStore) TransitionWorker(_ context.Context, id string, to model.WorkerStatus) error {
+func (s *MemoryStore) TransitionNode(_ context.Context, id string, to model.NodeStatus) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	v, ok := s.workers.Load(id)
+	v, ok := s.nodes.Load(id)
 	if !ok {
 		return ErrNotFound
 	}
-	w := v.(model.Worker)
-	if !model.TransitionWorker(w.Status, to) {
+	n := v.(model.Node)
+	if !model.TransitionNode(n.Status, to) {
 		return ErrInvalidTransition
 	}
-	w.Status = to
-	s.workers.Store(id, w)
+	n.Status = to
+	s.nodes.Store(id, n)
 	return nil
 }
 
-// --- Routes ---
+// --- Services ---
 
-func (s *MemoryStore) UpsertRoute(_ context.Context, r *model.Route) error {
+func (s *MemoryStore) UpsertService(_ context.Context, svc *model.Service) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	r.UpdatedAt = time.Now()
-	s.routes.Store(r.ID, r.Clone())
+	svc.UpdatedAt = time.Now()
+	s.services.Store(svc.ID, svc.Clone())
 	return nil
 }
 
-func (s *MemoryStore) GetRoute(_ context.Context, id string) (*model.Route, error) {
-	v, ok := s.routes.Load(id)
+func (s *MemoryStore) GetService(_ context.Context, id string) (*model.Service, error) {
+	v, ok := s.services.Load(id)
 	if !ok {
 		return nil, ErrNotFound
 	}
-	r := v.(model.Route).Clone()
-	return &r, nil
+	svc := v.(model.Service).Clone()
+	return &svc, nil
 }
 
-func (s *MemoryStore) ListRoutes(_ context.Context) ([]*model.Route, error) {
-	var out []*model.Route
-	s.routes.Range(func(_, v any) bool {
-		r := v.(model.Route).Clone()
-		out = append(out, &r)
+func (s *MemoryStore) ListServices(_ context.Context) ([]*model.Service, error) {
+	var out []*model.Service
+	s.services.Range(func(_, v any) bool {
+		svc := v.(model.Service).Clone()
+		out = append(out, &svc)
 		return true
 	})
 	return out, nil
 }
 
-func (s *MemoryStore) DeleteRoute(_ context.Context, id string) error {
+func (s *MemoryStore) DeleteService(_ context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, exists := s.routes.Load(id); !exists {
+	if _, exists := s.services.Load(id); !exists {
 		return ErrNotFound
 	}
-	s.routes.Delete(id)
+	s.services.Delete(id)
 	return nil
 }

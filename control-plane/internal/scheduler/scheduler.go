@@ -12,9 +12,8 @@ import (
 	"github.com/czhao-dev/control-plane/internal/state"
 )
 
-// Scheduler assigns PENDING jobs to HEALTHY workers with available capacity
-// on a fixed poll interval -- mirrors ml-job-orchestrator's poll-based
-// scheduler loop shape.
+// Scheduler assigns PENDING pods to HEALTHY nodes with available capacity
+// on a fixed poll interval.
 type Scheduler struct {
 	store    state.Store
 	interval time.Duration
@@ -53,58 +52,58 @@ func (s *Scheduler) Run(ctx context.Context) {
 // Tick runs one scheduling pass. Exported so the "rebalance" API and tests
 // can trigger it synchronously outside the regular ticker cadence.
 func (s *Scheduler) Tick(ctx context.Context) {
-	pending, err := s.store.ListJobsByStatus(ctx, model.JobPending)
+	pending, err := s.store.ListPodsByStatus(ctx, model.PodPending)
 	if err != nil {
-		s.logger.Error("scheduler: list pending jobs", "error", err)
+		s.logger.Error("scheduler: list pending pods", "error", err)
 		return
 	}
 	sort.Slice(pending, func(i, j int) bool { return pending[i].CreatedAt.Before(pending[j].CreatedAt) })
 
-	workers, err := s.store.ListWorkers(ctx)
+	nodes, err := s.store.ListNodes(ctx)
 	if err != nil {
-		s.logger.Error("scheduler: list workers", "error", err)
+		s.logger.Error("scheduler: list nodes", "error", err)
 		return
 	}
 
 	now := time.Now()
 	scheduled := 0
-	for _, job := range pending {
-		if !job.RunAfter.IsZero() && job.RunAfter.After(now) {
+	for _, pod := range pending {
+		if !pod.RunAfter.IsZero() && pod.RunAfter.After(now) {
 			continue // backoff gate set by the reconciler; not ready yet
 		}
 
 		var required model.ResourceRequest
-		if workload, err := s.store.GetWorkload(ctx, job.WorkloadID); err == nil {
-			required = workload.Resources
+		if deployment, err := s.store.GetDeployment(ctx, pod.DeploymentID); err == nil {
+			required = deployment.Resources
 		}
 
-		worker, err := SelectWorker(workers, required)
+		node, err := SelectNode(nodes, required)
 		if err != nil {
 			continue // no capacity right now; retry next tick
 		}
 
-		// Set WorkerID via UpdateJob first (job.Status still matches the
-		// stored PENDING value here), then flip status via TransitionJob --
-		// doing it in the other order would have TransitionJob's internal
-		// load/modify/store clobber the WorkerID set on this local copy.
-		job.WorkerID = worker.ID
-		if err := s.store.UpdateJob(ctx, job); err != nil {
-			s.logger.Warn("scheduler: assign worker", "job_id", job.ID, "error", err)
+		// Set NodeID via UpdatePod first (pod.Status still matches the
+		// stored PENDING value here), then flip status via TransitionPod --
+		// doing it in the other order would have TransitionPod's internal
+		// load/modify/store clobber the NodeID set on this local copy.
+		pod.NodeID = node.ID
+		if err := s.store.UpdatePod(ctx, pod); err != nil {
+			s.logger.Warn("scheduler: assign node", "pod_id", pod.ID, "error", err)
 			continue
 		}
-		if err := s.store.TransitionJob(ctx, job.ID, model.JobScheduled, ""); err != nil {
-			s.logger.Warn("scheduler: transition job", "job_id", job.ID, "error", err)
+		if err := s.store.TransitionPod(ctx, pod.ID, model.PodScheduled, ""); err != nil {
+			s.logger.Warn("scheduler: transition pod", "pod_id", pod.ID, "error", err)
 			continue
 		}
 
-		worker.Available.CPU -= required.CPU
-		worker.Available.MemoryMB -= required.MemoryMB
-		worker.RunningJobs++
-		if err := s.store.UpdateWorker(ctx, worker); err != nil {
-			s.logger.Warn("scheduler: update worker capacity", "worker_id", worker.ID, "error", err)
+		node.Available.CPU -= required.CPU
+		node.Available.MemoryMB -= required.MemoryMB
+		node.RunningJobs++
+		if err := s.store.UpdateNode(ctx, node); err != nil {
+			s.logger.Warn("scheduler: update node capacity", "node_id", node.ID, "error", err)
 		}
 
-		metrics.SchedulerLatencySeconds.Observe(time.Since(job.CreatedAt).Seconds())
+		metrics.SchedulerLatencySeconds.Observe(time.Since(pod.CreatedAt).Seconds())
 		scheduled++
 	}
 

@@ -14,32 +14,35 @@ var (
 )
 
 // Store is the control plane's view of desired and observed cluster state:
-// workloads (desired state), jobs (execution units), workers (execution
-// nodes), and routes (proxy routing config).
+// deployments (desired state), pods (execution units), nodes (execution
+// nodes), and services (proxy routing config).
 type Store interface {
-	CreateWorkload(ctx context.Context, w *model.Workload) error
-	GetWorkload(ctx context.Context, id string) (*model.Workload, error)
-	ListWorkloads(ctx context.Context) ([]*model.Workload, error)
-	UpdateWorkload(ctx context.Context, w *model.Workload) error
-	TransitionWorkload(ctx context.Context, id string, to model.WorkloadStatus) error
-	DeleteWorkload(ctx context.Context, id string) error
+	CreateDeployment(ctx context.Context, d *model.Deployment) error
+	GetDeployment(ctx context.Context, id string) (*model.Deployment, error)
+	ListDeployments(ctx context.Context) ([]*model.Deployment, error)
+	ListDeploymentsByNamespace(ctx context.Context, namespace string) ([]*model.Deployment, error)
+	UpdateDeployment(ctx context.Context, d *model.Deployment) error
+	TransitionDeployment(ctx context.Context, id string, to model.DeploymentStatus) error
+	DeleteDeployment(ctx context.Context, id string) error
 
-	CreateJob(ctx context.Context, j *model.Job) error
-	GetJob(ctx context.Context, id string) (*model.Job, error)
-	ListJobsByWorkload(ctx context.Context, workloadID string) ([]*model.Job, error)
-	ListJobsByStatus(ctx context.Context, status model.JobStatus) ([]*model.Job, error)
-	ListJobsByWorker(ctx context.Context, workerID string) ([]*model.Job, error)
-	UpdateJob(ctx context.Context, j *model.Job) error
-	TransitionJob(ctx context.Context, id string, to model.JobStatus, errMsg string) error
+	CreatePod(ctx context.Context, p *model.Pod) error
+	GetPod(ctx context.Context, id string) (*model.Pod, error)
+	ListPodsByDeployment(ctx context.Context, deploymentID string) ([]*model.Pod, error)
+	ListPodsByStatus(ctx context.Context, status model.PodStatus) ([]*model.Pod, error)
+	ListPodsByNode(ctx context.Context, nodeID string) ([]*model.Pod, error)
+	ListPodsByLabels(ctx context.Context, namespace string, selector map[string]string) ([]*model.Pod, error)
+	UpdatePod(ctx context.Context, p *model.Pod) error
+	TransitionPod(ctx context.Context, id string, to model.PodStatus, errMsg string) error
 
-	RegisterWorker(ctx context.Context, w *model.Worker) error
-	GetWorker(ctx context.Context, id string) (*model.Worker, error)
-	ListWorkers(ctx context.Context) ([]*model.Worker, error)
-	UpdateWorker(ctx context.Context, w *model.Worker) error
-	TransitionWorker(ctx context.Context, id string, to model.WorkerStatus) error
+	RegisterNode(ctx context.Context, n *model.Node) error
+	GetNode(ctx context.Context, id string) (*model.Node, error)
+	ListNodes(ctx context.Context) ([]*model.Node, error)
+	ListNodesByLabels(ctx context.Context, selector map[string]string) ([]*model.Node, error)
+	UpdateNode(ctx context.Context, n *model.Node) error
+	TransitionNode(ctx context.Context, id string, to model.NodeStatus) error
 
-	UpsertRoute(ctx context.Context, r *model.Route) error
-	GetRoute(ctx context.Context, id string) (*model.Route, error)
-	ListRoutes(ctx context.Context) ([]*model.Route, error)
-	DeleteRoute(ctx context.Context, id string) error
+	UpsertService(ctx context.Context, s *model.Service) error
+	GetService(ctx context.Context, id string) (*model.Service, error)
+	ListServices(ctx context.Context) ([]*model.Service, error)
+	DeleteService(ctx context.Context, id string) error
 }

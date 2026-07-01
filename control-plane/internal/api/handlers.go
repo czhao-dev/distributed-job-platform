@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/czhao-dev/control-plane/internal/scheduler"
 	"github.com/czhao-dev/control-plane/internal/state"
@@ -13,7 +14,7 @@ import (
 // Handlers holds the dependencies shared by every HTTP handler.
 type Handlers struct {
 	store     state.Store
-	scheduler *scheduler.Scheduler // nil until the scheduler is wired in (milestone 3)
+	scheduler *scheduler.Scheduler
 }
 
 func NewHandlers(st state.Store, sched *scheduler.Scheduler) *Handlers {
@@ -26,6 +27,18 @@ func generateID(prefix string) (string, error) {
 		return "", err
 	}
 	return prefix + "_" + hex.EncodeToString(b), nil
+}
+
+// parseLabels converts repeated ?label=key=value query params into a selector map.
+func parseLabels(vals []string) map[string]string {
+	labels := make(map[string]string, len(vals))
+	for _, v := range vals {
+		k, val, ok := strings.Cut(v, "=")
+		if ok {
+			labels[k] = val
+		}
+	}
+	return labels
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

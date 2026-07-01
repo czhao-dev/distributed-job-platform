@@ -1,4 +1,8 @@
 name: heartbeat-service
+namespace: default
+labels:
+  app: heartbeat
+  tier: service
 type: service
 command: "sleep"
 args: ["120"]

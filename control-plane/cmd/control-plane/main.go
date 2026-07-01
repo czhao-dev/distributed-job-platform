@@ -23,7 +23,20 @@ func main() {
 	logger := logging.New(cfg.LogLevel, cfg.LogFormat)
 	slog.SetDefault(logger)
 
-	store := state.NewMemoryStore()
+	var store state.Store
+	if cfg.DBPath != "" {
+		bs, err := state.NewBoltStore(cfg.DBPath)
+		if err != nil {
+			logger.Error("failed to open BoltDB", "path", cfg.DBPath, "error", err)
+			os.Exit(1)
+		}
+		defer bs.Close()
+		store = bs
+		logger.Info("using BoltDB state store (persistent)", "path", cfg.DBPath)
+	} else {
+		store = state.NewMemoryStore()
+		logger.Info("using in-memory state store (ephemeral — set CTRLPLANE_DB_PATH for persistence)")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

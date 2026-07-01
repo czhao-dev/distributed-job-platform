@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Demonstrates health-aware proxy failover: sends traffic through the
-# dynamic-discovery proxy, kills a worker, shows traffic continuing on the
-# remaining healthy backends, then restarts the worker and shows it rejoin
+# dynamic-discovery proxy, kills a node, shows traffic continuing on the
+# remaining healthy nodes, then restarts the node and shows it rejoin
 # rotation. Run ./run-local-cluster.sh first.
 #
-# Note: the worker agent isn't a job-serving HTTP service (jobs run as
+# Note: the node agent isn't a pod-serving HTTP service (pods run as
 # subprocesses) -- its small metrics listener's /readyz endpoint stands in
 # as "traffic" here, which is enough to demonstrate health-aware routing and
-# failover without conflating it with a real workload's behavior.
+# failover without conflating it with a real pod workload's behavior.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -23,15 +23,15 @@ send_burst() {
   done
 }
 
-echo "1. Current backends:"
+echo "1. Current backends (all healthy nodes):"
 curl -s "$PROXY_URL/admin/backends" | python3 -m json.tool 2>/dev/null || curl -s "$PROXY_URL/admin/backends"
 
 echo
-echo "2. Sending traffic with all workers healthy..."
+echo "2. Sending traffic with all nodes healthy..."
 send_burst "before kill"
 
 echo
-echo "3. Killing worker-1..."
+echo "3. Killing worker-1 node..."
 ( cd .. && docker compose kill worker-1 )
 
 echo "   Waiting for the proxy's active health check to notice (a few seconds)..."
@@ -42,14 +42,14 @@ echo "4. Backends after kill:"
 curl -s "$PROXY_URL/admin/backends" | python3 -m json.tool 2>/dev/null || curl -s "$PROXY_URL/admin/backends"
 
 echo
-echo "5. Sending traffic again -- should still succeed via remaining workers:"
+echo "5. Sending traffic again -- should still succeed via remaining nodes:"
 send_burst "after kill"
 
 echo
-echo "6. Restarting worker-1..."
+echo "6. Restarting worker-1 node..."
 ( cd .. && docker compose start worker-1 )
 echo "   Waiting for it to re-register, pass health checks, and for the proxy's
-   discovery refresh (every 5s) to drop the dead worker's stale entry..."
+   discovery refresh (every 5s) to drop the dead node's stale entry..."
 sleep 12
 
 echo

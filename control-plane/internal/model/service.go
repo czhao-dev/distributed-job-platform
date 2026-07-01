@@ -11,13 +11,13 @@ const (
 	StrategyWeighted   LoadBalanceStrategy = "weighted_round_robin"
 )
 
-// RetryPolicy is the proxy's per-route retry behavior.
+// RetryPolicy is the proxy's per-service retry behavior.
 type RetryPolicy struct {
 	MaxAttempts     int `json:"max_attempts"`
 	PerTryTimeoutMS int `json:"per_try_timeout_ms"`
 }
 
-// HealthCheckConfig is the proxy's per-route active health-check behavior.
+// HealthCheckConfig is the proxy's per-service active health-check behavior.
 type HealthCheckConfig struct {
 	Path            string `json:"path"`
 	IntervalSeconds int    `json:"interval_seconds"`
@@ -33,25 +33,35 @@ type BackendSpec struct {
 	Weight int    `json:"weight"`
 }
 
-// Route describes how the reverse proxy should route traffic for a path
-// prefix. Routes are config data, not a workflow entity, so they have no
-// state machine — just create/update/delete.
-type Route struct {
+// Service describes how the reverse proxy should route traffic for a path
+// prefix. The Selector field resolves backends dynamically by matching against
+// Node labels at request time, rather than a static backend list.
+//
+// Design note: Service.Selector matches Node labels (not Pod labels) because
+// Pods in this system run as subprocesses with no independent network address —
+// the only routable entities are Nodes. Production orchestrators instead route
+// to Pods directly, but that requires a container networking layer this project
+// does not implement.
+type Service struct {
 	ID          string              `json:"id"`
 	Name        string              `json:"name"`
+	Namespace   string              `json:"namespace"`
 	PathPrefix  string              `json:"path_prefix"`
 	Strategy    LoadBalanceStrategy `json:"strategy"`
-	Backends    []BackendSpec       `json:"backends"`
+	Selector    map[string]string   `json:"selector,omitempty"`
 	RetryPolicy RetryPolicy         `json:"retry_policy"`
 	HealthCheck HealthCheckConfig   `json:"health_check"`
 	UpdatedAt   time.Time           `json:"updated_at"`
 }
 
-// Clone returns a deep copy of the Route.
-func (r Route) Clone() Route {
-	c := r
-	if r.Backends != nil {
-		c.Backends = append([]BackendSpec(nil), r.Backends...)
+// Clone returns a deep copy of the Service.
+func (s Service) Clone() Service {
+	c := s
+	if s.Selector != nil {
+		c.Selector = make(map[string]string, len(s.Selector))
+		for k, v := range s.Selector {
+			c.Selector[k] = v
+		}
 	}
 	return c
 }

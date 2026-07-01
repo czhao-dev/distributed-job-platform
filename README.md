@@ -123,6 +123,6 @@ cd control-plane && go build ./... && go test ./...           # control plane bu
 - [Prometheus](https://prometheus.io/docs/introduction/overview/) — metrics collection and alerting
 - [Grafana](https://grafana.com/docs/grafana/latest/) — metrics visualization and dashboards
 - [Docker Compose](https://docs.docker.com/compose/) — local multi-service orchestration for the demo stacks
-- [Kubernetes controller pattern](https://kubernetes.io/docs/concepts/architecture/controller/) — the reconcile-loop (desired vs. actual state) design that inspired `internal/reconciler`
+- Controller / reconcile-loop pattern — the desired-vs-actual-state design that inspired `internal/reconciler`
 - [gopkg.in/yaml.v3](https://pkg.go.dev/gopkg.in/yaml.v3) — YAML parsing used for declarative workload spec files
 - [testify](https://github.com/stretchr/testify) — assertion and mock library used across all three modules

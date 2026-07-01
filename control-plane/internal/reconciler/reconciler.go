@@ -11,10 +11,9 @@ import (
 	"github.com/czhao-dev/control-plane/internal/state"
 )
 
-// Reconciler maintains desired state under failures: it creates/cancels
-// jobs to match each workload's desired replica count, and detects worker
-// heartbeat timeouts, marking workers unhealthy and rescheduling their
-// in-flight jobs.
+// Reconciler maintains desired state under failures: it creates/cancels pods
+// to match each deployment's desired replica count, and detects node heartbeat
+// timeouts, marking nodes unhealthy and rescheduling their in-flight pods.
 type Reconciler struct {
 	store            state.Store
 	interval         time.Duration
@@ -41,202 +40,217 @@ func (rc *Reconciler) Run(ctx context.Context) {
 }
 
 // Tick runs one reconciliation pass (replica reconciliation, then heartbeat
-// timeout detection). Exported so tests and the "rebalance"-adjacent demo
-// scripts can trigger it synchronously.
+// timeout detection). Exported so tests and demo scripts can trigger it
+// synchronously.
 func (rc *Reconciler) Tick(ctx context.Context) {
-	rc.reconcileWorkloads(ctx)
-	rc.detectUnhealthyWorkers(ctx)
+	rc.reconcileDeployments(ctx)
+	rc.detectUnhealthyNodes(ctx)
 	metrics.ReconcilerIterations.Inc()
 }
 
-func (rc *Reconciler) reconcileWorkloads(ctx context.Context) {
-	workloads, err := rc.store.ListWorkloads(ctx)
+func (rc *Reconciler) reconcileDeployments(ctx context.Context) {
+	deployments, err := rc.store.ListDeployments(ctx)
 	if err != nil {
-		rc.logger.Error("reconciler: list workloads", "error", err)
+		rc.logger.Error("reconciler: list deployments", "error", err)
 		return
 	}
 
-	for _, wl := range workloads {
-		if wl.Status == model.WorkloadCancelled {
+	for _, d := range deployments {
+		if d.Status == model.DeploymentCancelled {
 			continue
 		}
-		if wl.Status == model.WorkloadPending {
-			if err := rc.store.TransitionWorkload(ctx, wl.ID, model.WorkloadActive); err != nil {
-				rc.logger.Warn("reconciler: activate workload", "workload_id", wl.ID, "error", err)
+		if d.Status == model.DeploymentPending {
+			if err := rc.store.TransitionDeployment(ctx, d.ID, model.DeploymentActive); err != nil {
+				rc.logger.Warn("reconciler: activate deployment", "deployment_id", d.ID, "error", err)
 				continue
 			}
-			wl.Status = model.WorkloadActive
+			d.Status = model.DeploymentActive
 		}
 
-		jobs, err := rc.store.ListJobsByWorkload(ctx, wl.ID)
+		pods, err := rc.store.ListPodsByDeployment(ctx, d.ID)
 		if err != nil {
-			rc.logger.Error("reconciler: list jobs", "workload_id", wl.ID, "error", err)
+			rc.logger.Error("reconciler: list pods", "deployment_id", d.ID, "error", err)
 			continue
 		}
 
 		active := 0
 		hasDeadLetter := false
-		var cancellable []*model.Job // PENDING/SCHEDULED, candidates for scale-down
-		for _, j := range jobs {
-			if j.Active() {
+		var cancellable []*model.Pod // PENDING/SCHEDULED, candidates for scale-down
+		for _, p := range pods {
+			if p.Active() {
 				active++
 			}
-			if j.Status == model.JobDeadLetter {
+			if p.Status == model.PodDeadLetter {
 				hasDeadLetter = true
 			}
-			if j.Status == model.JobPending || j.Status == model.JobScheduled {
-				cancellable = append(cancellable, j)
+			if p.Status == model.PodPending || p.Status == model.PodScheduled {
+				cancellable = append(cancellable, p)
 			}
 		}
 
 		switch {
-		case active < wl.Replicas:
-			for i := 0; i < wl.Replicas-active; i++ {
-				id, err := newJobID()
+		case active < d.Replicas:
+			for i := 0; i < d.Replicas-active; i++ {
+				id, err := newPodID()
 				if err != nil {
-					rc.logger.Error("reconciler: generate job id", "error", err)
+					rc.logger.Error("reconciler: generate pod id", "error", err)
 					continue
 				}
-				job := &model.Job{
-					ID:         id,
-					WorkloadID: wl.ID,
-					Status:     model.JobPending,
-					Command:    wl.Command,
-					Args:       wl.Args,
-					CreatedAt:  time.Now(),
+				// Pods inherit Namespace and Labels from their owning Deployment
+				// (pod-template semantics: the Deployment is the template, Pods are instances).
+				pod := &model.Pod{
+					ID:           id,
+					DeploymentID: d.ID,
+					Namespace:    d.Namespace,
+					Labels:       cloneLabels(d.Labels),
+					Status:       model.PodPending,
+					Command:      d.Command,
+					Args:         d.Args,
+					CreatedAt:    time.Now(),
 				}
-				if err := rc.store.CreateJob(ctx, job); err != nil {
-					rc.logger.Error("reconciler: create job", "workload_id", wl.ID, "error", err)
+				if err := rc.store.CreatePod(ctx, pod); err != nil {
+					rc.logger.Error("reconciler: create pod", "deployment_id", d.ID, "error", err)
 					continue
 				}
 				metrics.JobsTotal.Inc()
 			}
-		case active > wl.Replicas:
-			excess := active - wl.Replicas
+		case active > d.Replicas:
+			excess := active - d.Replicas
 			sort.Slice(cancellable, func(i, j int) bool {
 				return cancellable[i].CreatedAt.After(cancellable[j].CreatedAt) // newest first
 			})
 			for i := 0; i < excess && i < len(cancellable); i++ {
-				if err := rc.store.TransitionJob(ctx, cancellable[i].ID, model.JobCancelled, "workload scaled down"); err != nil {
-					rc.logger.Warn("reconciler: cancel excess job", "job_id", cancellable[i].ID, "error", err)
+				if err := rc.store.TransitionPod(ctx, cancellable[i].ID, model.PodCancelled, "deployment scaled down"); err != nil {
+					rc.logger.Warn("reconciler: cancel excess pod", "pod_id", cancellable[i].ID, "error", err)
 				}
 			}
 		}
 
 		switch {
-		case hasDeadLetter && wl.Status == model.WorkloadActive:
-			_ = rc.store.TransitionWorkload(ctx, wl.ID, model.WorkloadDegraded)
-		case !hasDeadLetter && wl.Status == model.WorkloadDegraded:
-			_ = rc.store.TransitionWorkload(ctx, wl.ID, model.WorkloadActive)
+		case hasDeadLetter && d.Status == model.DeploymentActive:
+			_ = rc.store.TransitionDeployment(ctx, d.ID, model.DeploymentDegraded)
+		case !hasDeadLetter && d.Status == model.DeploymentDegraded:
+			_ = rc.store.TransitionDeployment(ctx, d.ID, model.DeploymentActive)
 		}
 	}
 }
 
-func (rc *Reconciler) detectUnhealthyWorkers(ctx context.Context) {
-	workers, err := rc.store.ListWorkers(ctx)
+func (rc *Reconciler) detectUnhealthyNodes(ctx context.Context) {
+	nodes, err := rc.store.ListNodes(ctx)
 	if err != nil {
-		rc.logger.Error("reconciler: list workers", "error", err)
+		rc.logger.Error("reconciler: list nodes", "error", err)
 		return
 	}
 
 	now := time.Now()
 	unhealthyCount := 0
-	for _, wk := range workers {
-		if wk.Status == model.WorkerUnhealthy {
+	for _, n := range nodes {
+		if n.Status == model.NodeUnhealthy {
 			unhealthyCount++
 		}
-		timedOut := now.Sub(wk.LastHeartbeatAt) > rc.heartbeatTimeout
+		timedOut := now.Sub(n.LastHeartbeatAt) > rc.heartbeatTimeout
 
 		switch {
-		case wk.Status == model.WorkerHealthy && timedOut:
-			if err := rc.store.TransitionWorker(ctx, wk.ID, model.WorkerUnhealthy); err != nil {
-				rc.logger.Warn("reconciler: mark worker unhealthy", "worker_id", wk.ID, "error", err)
+		case n.Status == model.NodeHealthy && timedOut:
+			if err := rc.store.TransitionNode(ctx, n.ID, model.NodeUnhealthy); err != nil {
+				rc.logger.Warn("reconciler: mark node unhealthy", "node_id", n.ID, "error", err)
 				continue
 			}
 			unhealthyCount++
-			rc.logger.Warn("reconciler: worker heartbeat timeout", "worker_id", wk.ID)
-			rc.rescheduleJobsFor(ctx, wk.ID)
+			rc.logger.Warn("reconciler: node heartbeat timeout", "node_id", n.ID)
+			rc.reschedulePodsFor(ctx, n.ID)
 
-		case wk.Status == model.WorkerDraining && timedOut:
+		case n.Status == model.NodeDraining && timedOut:
 			// An operator-initiated decommission that's gone quiet: remove
 			// rather than mark unhealthy.
-			if err := rc.store.TransitionWorker(ctx, wk.ID, model.WorkerRemoved); err != nil {
-				rc.logger.Warn("reconciler: remove drained worker", "worker_id", wk.ID, "error", err)
+			if err := rc.store.TransitionNode(ctx, n.ID, model.NodeRemoved); err != nil {
+				rc.logger.Warn("reconciler: remove drained node", "node_id", n.ID, "error", err)
 				continue
 			}
-			rc.rescheduleJobsFor(ctx, wk.ID)
+			rc.reschedulePodsFor(ctx, n.ID)
 		}
 	}
 	metrics.UnhealthyWorkers.Set(float64(unhealthyCount))
 }
 
-// rescheduleJobsFor requeues (with backoff) or dead-letters every RUNNING
-// job assigned to a worker that just went unhealthy/removed. We can't know
-// whether the job actually died or the worker just had a network blip, so
-// we pessimistically requeue it.
-func (rc *Reconciler) rescheduleJobsFor(ctx context.Context, workerID string) {
-	jobs, err := rc.store.ListJobsByWorker(ctx, workerID)
+// reschedulePodsFor requeues (with backoff) or dead-letters every RUNNING pod
+// assigned to a node that just went unhealthy/removed. We can't know whether
+// the pod actually died or the node just had a network blip, so we
+// pessimistically requeue it.
+func (rc *Reconciler) reschedulePodsFor(ctx context.Context, nodeID string) {
+	pods, err := rc.store.ListPodsByNode(ctx, nodeID)
 	if err != nil {
-		rc.logger.Error("reconciler: list jobs by worker", "worker_id", workerID, "error", err)
+		rc.logger.Error("reconciler: list pods by node", "node_id", nodeID, "error", err)
 		return
 	}
 
-	for _, j := range jobs {
-		// A job that was SCHEDULED but never reached RUNNING (the worker
+	for _, p := range pods {
+		// A pod that was SCHEDULED but never reached RUNNING (the node
 		// died between dispatch and pickup) never actually executed, so it
 		// doesn't burn a retry attempt -- just send it straight back to
 		// PENDING (a legal SCHEDULED->PENDING transition) for the scheduler
 		// to reassign.
-		if j.Status == model.JobScheduled {
-			j.WorkerID = ""
-			if err := rc.store.UpdateJob(ctx, j); err != nil {
-				rc.logger.Warn("reconciler: clear worker on orphaned scheduled job", "job_id", j.ID, "error", err)
+		if p.Status == model.PodScheduled {
+			p.NodeID = ""
+			if err := rc.store.UpdatePod(ctx, p); err != nil {
+				rc.logger.Warn("reconciler: clear node on orphaned scheduled pod", "pod_id", p.ID, "error", err)
 				continue
 			}
-			if err := rc.store.TransitionJob(ctx, j.ID, model.JobPending, ""); err != nil {
-				rc.logger.Warn("reconciler: requeue orphaned scheduled job", "job_id", j.ID, "error", err)
+			if err := rc.store.TransitionPod(ctx, p.ID, model.PodPending, ""); err != nil {
+				rc.logger.Warn("reconciler: requeue orphaned scheduled pod", "pod_id", p.ID, "error", err)
 			}
 			continue
 		}
-		if j.Status != model.JobRunning {
+		if p.Status != model.PodRunning {
 			continue
 		}
 
-		workload, err := rc.store.GetWorkload(ctx, j.WorkloadID)
+		deployment, err := rc.store.GetDeployment(ctx, p.DeploymentID)
 		maxRetries := 0
 		if err == nil {
-			maxRetries = workload.MaxRetries
+			maxRetries = deployment.MaxRetries
 		}
 
-		newAttempt := j.Attempt + 1
+		newAttempt := p.Attempt + 1
 		if newAttempt <= maxRetries {
-			j.Attempt = newAttempt
-			j.RunAfter = time.Now().Add(backoff(newAttempt))
-			j.WorkerID = ""
-			if err := rc.store.UpdateJob(ctx, j); err != nil {
-				rc.logger.Warn("reconciler: bump job attempt", "job_id", j.ID, "error", err)
+			p.Attempt = newAttempt
+			p.RunAfter = time.Now().Add(backoff(newAttempt))
+			p.NodeID = ""
+			if err := rc.store.UpdatePod(ctx, p); err != nil {
+				rc.logger.Warn("reconciler: bump pod attempt", "pod_id", p.ID, "error", err)
 				continue
 			}
-			if err := rc.store.TransitionJob(ctx, j.ID, model.JobFailed, "worker heartbeat timeout"); err != nil {
-				rc.logger.Warn("reconciler: transition job to failed", "job_id", j.ID, "error", err)
+			if err := rc.store.TransitionPod(ctx, p.ID, model.PodFailed, "node heartbeat timeout"); err != nil {
+				rc.logger.Warn("reconciler: transition pod to failed", "pod_id", p.ID, "error", err)
 				continue
 			}
-			_ = rc.store.TransitionJob(ctx, j.ID, model.JobRetrying, "")
-			_ = rc.store.TransitionJob(ctx, j.ID, model.JobPending, "")
+			_ = rc.store.TransitionPod(ctx, p.ID, model.PodRetrying, "")
+			_ = rc.store.TransitionPod(ctx, p.ID, model.PodPending, "")
 			metrics.JobsFailed.Inc()
 		} else {
-			j.Attempt = newAttempt
-			if err := rc.store.UpdateJob(ctx, j); err != nil {
-				rc.logger.Warn("reconciler: bump job attempt", "job_id", j.ID, "error", err)
+			p.Attempt = newAttempt
+			if err := rc.store.UpdatePod(ctx, p); err != nil {
+				rc.logger.Warn("reconciler: bump pod attempt", "pod_id", p.ID, "error", err)
 				continue
 			}
-			if err := rc.store.TransitionJob(ctx, j.ID, model.JobFailed, "worker heartbeat timeout"); err != nil {
-				rc.logger.Warn("reconciler: transition job to failed", "job_id", j.ID, "error", err)
+			if err := rc.store.TransitionPod(ctx, p.ID, model.PodFailed, "node heartbeat timeout"); err != nil {
+				rc.logger.Warn("reconciler: transition pod to failed", "pod_id", p.ID, "error", err)
 				continue
 			}
-			_ = rc.store.TransitionJob(ctx, j.ID, model.JobDeadLetter, "max retries exceeded after worker failure")
+			_ = rc.store.TransitionPod(ctx, p.ID, model.PodDeadLetter, "max retries exceeded after node failure")
 			metrics.JobsFailed.Inc()
 			metrics.JobsDeadLetter.Inc()
 		}
 	}
+}
+
+func cloneLabels(labels map[string]string) map[string]string {
+	if labels == nil {
+		return nil
+	}
+	out := make(map[string]string, len(labels))
+	for k, v := range labels {
+		out[k] = v
+	}
+	return out
 }

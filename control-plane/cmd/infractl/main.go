@@ -1,6 +1,6 @@
 // infractl is a stdlib-net/http-only CLI client for the control-plane REST
-// API, modeled on ml-job-orchestrator's mlctl but with a two-level
-// noun/verb command tree (workload/worker/route/cluster/scheduler).
+// API. Two-level noun/verb command tree:
+// deployment / node / service / cluster / scheduler.
 package main
 
 import (
@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -32,12 +33,12 @@ func main() {
 	noun, verb, rest := os.Args[1], os.Args[2], os.Args[3:]
 
 	switch noun {
-	case "workload":
-		dispatchWorkload(verb, rest)
-	case "worker":
-		dispatchWorker(verb, rest)
-	case "route":
-		dispatchRoute(verb, rest)
+	case "deployment":
+		dispatchDeployment(verb, rest)
+	case "node":
+		dispatchNode(verb, rest)
+	case "service":
+		dispatchService(verb, rest)
 	case "cluster":
 		dispatchCluster(verb, rest)
 	case "scheduler":
@@ -49,52 +50,117 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `infractl <noun> <verb> [args]
+	fmt.Fprintln(os.Stderr, `infractl <noun> <verb> [flags] [args]
 
-  workload submit <file.yaml>
-  workload list
-  workload status <id>
-  workload cancel <id>
+  deployment submit <file.yaml>
+  deployment list [--namespace <ns>] [--label key=value ...]
+  deployment status <id>
+  deployment cancel <id>
 
-  worker list
-  worker status <id>
-  worker drain <id>
+  node list [--label key=value ...]
+  node status <id>
+  node drain <id>
 
-  route list
-  route add <file.yaml>
-  route status <id>
+  service list [--namespace <ns>]
+  service add <file.yaml>
+  service status <id>
+  service backends <id>
 
   cluster status
   scheduler stats
 
+Flags:
+  --namespace <ns>      Filter by namespace (deployment list, service list)
+  --label key=value     Filter by label (repeatable; deployment list, node list)
+
 Set INFRACTL_SERVER (default http://localhost:7070) to point at a different control plane.`)
 }
 
-// --- workload ---
+// cliFlags holds optional flag values parsed from trailing args.
+type cliFlags struct {
+	namespace string
+	labels    map[string]string
+	positional []string
+}
 
-func dispatchWorkload(verb string, args []string) {
+// parseFlags extracts --namespace and --label flags from args, returning the
+// remainder as positional args.
+func parseFlags(args []string) cliFlags {
+	f := cliFlags{labels: make(map[string]string)}
+	i := 0
+	for i < len(args) {
+		switch args[i] {
+		case "--namespace", "-n":
+			i++
+			if i < len(args) {
+				f.namespace = args[i]
+			}
+		case "--label", "-l":
+			i++
+			if i < len(args) {
+				k, v, ok := strings.Cut(args[i], "=")
+				if ok {
+					f.labels[k] = v
+				}
+			}
+		default:
+			if strings.HasPrefix(args[i], "--namespace=") {
+				f.namespace = strings.TrimPrefix(args[i], "--namespace=")
+			} else if strings.HasPrefix(args[i], "--label=") {
+				kv := strings.TrimPrefix(args[i], "--label=")
+				k, v, ok := strings.Cut(kv, "=")
+				if ok {
+					f.labels[k] = v
+				}
+			} else {
+				f.positional = append(f.positional, args[i])
+			}
+		}
+		i++
+	}
+	return f
+}
+
+// buildQuery assembles query params from a namespace and label map.
+func buildQuery(namespace string, labels map[string]string) string {
+	q := url.Values{}
+	if namespace != "" {
+		q.Set("namespace", namespace)
+	}
+	for k, v := range labels {
+		q.Add("label", k+"="+v)
+	}
+	if len(q) == 0 {
+		return ""
+	}
+	return "?" + q.Encode()
+}
+
+// --- deployment ---
+
+func dispatchDeployment(verb string, args []string) {
 	switch verb {
 	case "submit":
-		cmdWorkloadSubmit(args)
+		cmdDeploymentSubmit(args)
 	case "list":
-		cmdWorkloadList()
+		cmdDeploymentList(args)
 	case "status":
-		cmdWorkloadStatus(args)
+		cmdDeploymentStatus(args)
 	case "cancel":
-		cmdWorkloadCancel(args)
+		cmdDeploymentCancel(args)
 	default:
 		usage()
 		os.Exit(1)
 	}
 }
 
-func cmdWorkloadSubmit(args []string) {
+func cmdDeploymentSubmit(args []string) {
 	if len(args) < 1 {
-		fatalf("workload submit: file path required")
+		fatalf("deployment submit: file path required")
 	}
 	body := readYAMLAsJSON(args[0])
 
-	resp, err := http.Post(serverURL()+"/api/v1/workloads", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(serverURL()+"/api/v1/deployments", "application/json", bytes.NewReader(body))
 	if err != nil {
 		fatalf("submit failed: %v", err)
 	}
@@ -102,174 +168,207 @@ func cmdWorkloadSubmit(args []string) {
 	if resp.StatusCode != http.StatusCreated {
 		fatalf("submit failed: %s", readErrorBody(resp))
 	}
-	var w model.Workload
-	if err := json.NewDecoder(resp.Body).Decode(&w); err != nil {
+	var d model.Deployment
+	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
 		fatalf("submit: failed to decode response: %v", err)
 	}
-	fmt.Printf("Submitted %s (%s)\n", w.ID, w.Name)
+	fmt.Printf("Submitted %s (%s)\n", d.ID, d.Name)
 }
 
-func cmdWorkloadList() {
+func cmdDeploymentList(args []string) {
+	f := parseFlags(args)
 	var result struct {
-		Workloads []model.Workload `json:"workloads"`
-		Total     int              `json:"total"`
+		Deployments []model.Deployment `json:"deployments"`
+		Total       int                `json:"total"`
 	}
-	getJSON("/api/v1/workloads", &result)
+	getJSON("/api/v1/deployments"+buildQuery(f.namespace, f.labels), &result)
 
-	fmt.Printf("%-20s %-16s %-10s %-10s %-10s\n", "ID", "NAME", "TYPE", "STATUS", "REPLICAS")
-	for _, w := range result.Workloads {
-		fmt.Printf("%-20s %-16s %-10s %-10s %-10d\n", w.ID, w.Name, w.Type, w.Status, w.Replicas)
+	fmt.Printf("%-22s %-16s %-12s %-10s %-10s %-10s\n", "ID", "NAME", "NAMESPACE", "TYPE", "STATUS", "REPLICAS")
+	for _, d := range result.Deployments {
+		fmt.Printf("%-22s %-16s %-12s %-10s %-10s %-10d\n", d.ID, d.Name, d.Namespace, d.Type, d.Status, d.Replicas)
 	}
 	fmt.Printf("\n%d total\n", result.Total)
 }
 
-func cmdWorkloadStatus(args []string) {
-	if len(args) < 1 {
-		fatalf("workload status: id required")
+func cmdDeploymentStatus(args []string) {
+	f := parseFlags(args)
+	if len(f.positional) < 1 {
+		fatalf("deployment status: id required")
 	}
-	var w model.Workload
-	getJSON("/api/v1/workloads/"+args[0], &w)
+	id := f.positional[0]
+	var d model.Deployment
+	getJSON("/api/v1/deployments/"+id, &d)
 
-	fmt.Printf("ID:       %s\n", w.ID)
-	fmt.Printf("Name:     %s\n", w.Name)
-	fmt.Printf("Type:     %s\n", w.Type)
-	fmt.Printf("Status:   %s\n", w.Status)
-	fmt.Printf("Replicas: %d\n", w.Replicas)
+	fmt.Printf("ID:        %s\n", d.ID)
+	fmt.Printf("Name:      %s\n", d.Name)
+	fmt.Printf("Namespace: %s\n", d.Namespace)
+	fmt.Printf("Type:      %s\n", d.Type)
+	fmt.Printf("Status:    %s\n", d.Status)
+	fmt.Printf("Replicas:  %d\n", d.Replicas)
 
-	var jobsResult struct {
-		Jobs  []model.Job `json:"jobs"`
+	var podsResult struct {
+		Pods  []model.Pod `json:"pods"`
 		Total int         `json:"total"`
 	}
-	getJSON("/api/v1/workloads/"+args[0]+"/jobs", &jobsResult)
+	getJSON("/api/v1/deployments/"+id+"/pods", &podsResult)
 
-	fmt.Printf("\nJobs (%d):\n", jobsResult.Total)
-	fmt.Printf("%-16s %-16s %-12s %-8s\n", "ID", "WORKER", "STATUS", "ATTEMPT")
-	for _, j := range jobsResult.Jobs {
-		fmt.Printf("%-16s %-16s %-12s %-8d\n", j.ID, j.WorkerID, j.Status, j.Attempt)
+	fmt.Printf("\nPods (%d):\n", podsResult.Total)
+	fmt.Printf("%-18s %-16s %-12s %-8s\n", "ID", "NODE", "STATUS", "ATTEMPT")
+	for _, p := range podsResult.Pods {
+		fmt.Printf("%-18s %-16s %-12s %-8d\n", p.ID, p.NodeID, p.Status, p.Attempt)
 	}
 }
 
-func cmdWorkloadCancel(args []string) {
-	if len(args) < 1 {
-		fatalf("workload cancel: id required")
+func cmdDeploymentCancel(args []string) {
+	f := parseFlags(args)
+	if len(f.positional) < 1 {
+		fatalf("deployment cancel: id required")
 	}
-	doRequest(http.MethodDelete, "/api/v1/workloads/"+args[0], nil, http.StatusOK)
-	fmt.Printf("Cancelled %s\n", args[0])
+	id := f.positional[0]
+	doRequest(http.MethodDelete, "/api/v1/deployments/"+id, nil, http.StatusOK)
+	fmt.Printf("Cancelled %s\n", id)
 }
 
-// --- worker ---
+// --- node ---
 
-func dispatchWorker(verb string, args []string) {
+func dispatchNode(verb string, args []string) {
 	switch verb {
 	case "list":
-		cmdWorkerList()
+		cmdNodeList(args)
 	case "status":
-		cmdWorkerStatus(args)
+		cmdNodeStatus(args)
 	case "drain":
-		cmdWorkerDrain(args)
+		cmdNodeDrain(args)
 	default:
 		usage()
 		os.Exit(1)
 	}
 }
 
-func cmdWorkerList() {
+func cmdNodeList(args []string) {
+	f := parseFlags(args)
 	var result struct {
-		Workers []model.Worker `json:"workers"`
-		Total   int            `json:"total"`
+		Nodes []model.Node `json:"nodes"`
+		Total int          `json:"total"`
 	}
-	getJSON("/api/v1/workers", &result)
+	getJSON("/api/v1/nodes"+buildQuery("", f.labels), &result)
 
-	fmt.Printf("%-16s %-24s %-10s %-8s %-8s\n", "ID", "ADDRESS", "STATUS", "RUNNING", "MAX")
-	for _, w := range result.Workers {
-		fmt.Printf("%-16s %-24s %-10s %-8d %-8d\n", w.ID, w.Address, w.Status, w.RunningJobs, w.MaxConcurrent)
+	fmt.Printf("%-18s %-24s %-10s %-8s %-8s\n", "ID", "ADDRESS", "STATUS", "RUNNING", "MAX")
+	for _, n := range result.Nodes {
+		fmt.Printf("%-18s %-24s %-10s %-8d %-8d\n", n.ID, n.Address, n.Status, n.RunningJobs, n.MaxConcurrent)
 	}
 	fmt.Printf("\n%d total\n", result.Total)
 }
 
-func cmdWorkerStatus(args []string) {
-	if len(args) < 1 {
-		fatalf("worker status: id required")
+func cmdNodeStatus(args []string) {
+	f := parseFlags(args)
+	if len(f.positional) < 1 {
+		fatalf("node status: id required")
 	}
-	var w model.Worker
-	getJSON("/api/v1/workers/"+args[0], &w)
+	var n model.Node
+	getJSON("/api/v1/nodes/"+f.positional[0], &n)
 
-	fmt.Printf("ID:            %s\n", w.ID)
-	fmt.Printf("Hostname:      %s\n", w.Hostname)
-	fmt.Printf("Address:       %s\n", w.Address)
-	fmt.Printf("Status:        %s\n", w.Status)
-	fmt.Printf("Running Jobs:  %d / %d\n", w.RunningJobs, w.MaxConcurrent)
-	fmt.Printf("Capacity:      cpu=%.2f memory_mb=%d\n", w.Capacity.CPU, w.Capacity.MemoryMB)
-	fmt.Printf("Available:     cpu=%.2f memory_mb=%d\n", w.Available.CPU, w.Available.MemoryMB)
-	fmt.Printf("Last Heartbeat: %s\n", w.LastHeartbeatAt.Format(time.RFC3339))
+	fmt.Printf("ID:             %s\n", n.ID)
+	fmt.Printf("Hostname:       %s\n", n.Hostname)
+	fmt.Printf("Address:        %s\n", n.Address)
+	fmt.Printf("Status:         %s\n", n.Status)
+	fmt.Printf("Running Pods:   %d / %d\n", n.RunningJobs, n.MaxConcurrent)
+	fmt.Printf("Capacity:       cpu=%.2f memory_mb=%d\n", n.Capacity.CPU, n.Capacity.MemoryMB)
+	fmt.Printf("Available:      cpu=%.2f memory_mb=%d\n", n.Available.CPU, n.Available.MemoryMB)
+	fmt.Printf("Last Heartbeat: %s\n", n.LastHeartbeatAt.Format(time.RFC3339))
 }
 
-func cmdWorkerDrain(args []string) {
-	if len(args) < 1 {
-		fatalf("worker drain: id required")
+func cmdNodeDrain(args []string) {
+	f := parseFlags(args)
+	if len(f.positional) < 1 {
+		fatalf("node drain: id required")
 	}
-	doRequest(http.MethodPost, "/api/v1/workers/"+args[0]+"/drain", nil, http.StatusOK)
-	fmt.Printf("Draining %s\n", args[0])
+	id := f.positional[0]
+	doRequest(http.MethodPost, "/api/v1/nodes/"+id+"/drain", nil, http.StatusOK)
+	fmt.Printf("Draining %s\n", id)
 }
 
-// --- route ---
+// --- service ---
 
-func dispatchRoute(verb string, args []string) {
+func dispatchService(verb string, args []string) {
 	switch verb {
 	case "list":
-		cmdRouteList()
+		cmdServiceList(args)
 	case "add":
-		cmdRouteAdd(args)
+		cmdServiceAdd(args)
 	case "status":
-		cmdRouteStatus(args)
+		cmdServiceStatus(args)
+	case "backends":
+		cmdServiceBackends(args)
 	default:
 		usage()
 		os.Exit(1)
 	}
 }
 
-func cmdRouteList() {
+func cmdServiceList(args []string) {
+	f := parseFlags(args)
 	var result struct {
-		Routes []model.Route `json:"routes"`
-		Total  int           `json:"total"`
+		Services []model.Service `json:"services"`
+		Total    int             `json:"total"`
 	}
-	getJSON("/api/v1/routes", &result)
+	getJSON("/api/v1/services"+buildQuery(f.namespace, nil), &result)
 
-	fmt.Printf("%-16s %-16s %-16s %-16s\n", "ID", "NAME", "PATH_PREFIX", "STRATEGY")
-	for _, r := range result.Routes {
-		fmt.Printf("%-16s %-16s %-16s %-16s\n", r.ID, r.Name, r.PathPrefix, r.Strategy)
+	fmt.Printf("%-18s %-16s %-12s %-16s %-16s\n", "ID", "NAME", "NAMESPACE", "PATH_PREFIX", "STRATEGY")
+	for _, s := range result.Services {
+		fmt.Printf("%-18s %-16s %-12s %-16s %-16s\n", s.ID, s.Name, s.Namespace, s.PathPrefix, s.Strategy)
 	}
 	fmt.Printf("\n%d total\n", result.Total)
 }
 
-func cmdRouteAdd(args []string) {
-	if len(args) < 1 {
-		fatalf("route add: file path required")
+func cmdServiceAdd(args []string) {
+	f := parseFlags(args)
+	if len(f.positional) < 1 {
+		fatalf("service add: file path required")
 	}
-	body := readYAMLAsJSON(args[0])
-	resp, err := http.Post(serverURL()+"/api/v1/routes", "application/json", bytes.NewReader(body))
+	body := readYAMLAsJSON(f.positional[0])
+	resp, err := http.Post(serverURL()+"/api/v1/services", "application/json", bytes.NewReader(body))
 	if err != nil {
-		fatalf("route add failed: %v", err)
+		fatalf("service add failed: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
-		fatalf("route add failed: %s", readErrorBody(resp))
+		fatalf("service add failed: %s", readErrorBody(resp))
 	}
-	var r model.Route
-	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
-		fatalf("route add: failed to decode response: %v", err)
+	var s model.Service
+	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
+		fatalf("service add: failed to decode response: %v", err)
 	}
-	fmt.Printf("Added route %s (%s)\n", r.ID, r.Name)
+	fmt.Printf("Added service %s (%s)\n", s.ID, s.Name)
 }
 
-func cmdRouteStatus(args []string) {
-	if len(args) < 1 {
-		fatalf("route status: id required")
+func cmdServiceStatus(args []string) {
+	f := parseFlags(args)
+	if len(f.positional) < 1 {
+		fatalf("service status: id required")
 	}
-	var r model.Route
-	getJSON("/api/v1/routes/"+args[0], &r)
-	b, _ := json.MarshalIndent(r, "", "  ")
+	var s model.Service
+	getJSON("/api/v1/services/"+f.positional[0], &s)
+	b, _ := json.MarshalIndent(s, "", "  ")
 	fmt.Println(string(b))
+}
+
+func cmdServiceBackends(args []string) {
+	f := parseFlags(args)
+	if len(f.positional) < 1 {
+		fatalf("service backends: id required")
+	}
+	var result struct {
+		Backends []model.BackendSpec `json:"backends"`
+		Total    int                 `json:"total"`
+	}
+	getJSON("/api/v1/services/"+f.positional[0]+"/backends", &result)
+
+	fmt.Printf("%-18s %-32s %-8s\n", "NAME", "URL", "WEIGHT")
+	for _, b := range result.Backends {
+		fmt.Printf("%-18s %-32s %-8d\n", b.Name, b.URL, b.Weight)
+	}
+	fmt.Printf("\n%d backend(s)\n", result.Total)
 }
 
 // --- cluster / scheduler ---
@@ -283,33 +382,33 @@ func dispatchCluster(verb string, _ []string) {
 }
 
 func cmdClusterStatus() {
-	var workloads struct {
+	var deployments struct {
 		Total int `json:"total"`
 	}
-	getJSON("/api/v1/workloads", &workloads)
+	getJSON("/api/v1/deployments", &deployments)
 
-	var workers struct {
-		Workers []model.Worker `json:"workers"`
-		Total   int            `json:"total"`
+	var nodes struct {
+		Nodes []model.Node `json:"nodes"`
+		Total int          `json:"total"`
 	}
-	getJSON("/api/v1/workers", &workers)
+	getJSON("/api/v1/nodes", &nodes)
 
-	var routes struct {
+	var services struct {
 		Total int `json:"total"`
 	}
-	getJSON("/api/v1/routes", &routes)
+	getJSON("/api/v1/services", &services)
 
 	healthy := 0
-	for _, w := range workers.Workers {
-		if w.Status == model.WorkerHealthy {
+	for _, n := range nodes.Nodes {
+		if n.Status == model.NodeHealthy {
 			healthy++
 		}
 	}
 
 	fmt.Printf("Control plane: %s\n", serverURL())
-	fmt.Printf("Workloads: %d\n", workloads.Total)
-	fmt.Printf("Workers:   %d (%d healthy)\n", workers.Total, healthy)
-	fmt.Printf("Routes:    %d\n", routes.Total)
+	fmt.Printf("Deployments:   %d\n", deployments.Total)
+	fmt.Printf("Nodes:         %d (%d healthy)\n", nodes.Total, healthy)
+	fmt.Printf("Services:      %d\n", services.Total)
 }
 
 func dispatchScheduler(verb string, _ []string) {
